@@ -12,11 +12,11 @@ total MCMC time, acceptance rate, and Frobenius approximation error.
 
 from __future__ import annotations
 
+import csv
 import os
 import sys
 import time
 
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.special import expit
 
@@ -73,10 +73,7 @@ def run_rwm(
     logp = log_posterior(nu, factor, y)
 
     step_times = np.zeros(total_steps, dtype=float)
-    logp_trace = np.zeros(total_steps, dtype=float)
     accepts = np.zeros(total_steps, dtype=bool)
-    nu_samples = np.zeros((n_samples, dim), dtype=float)
-    post_idx = 0
 
     for i in range(total_steps):
         t0 = time.perf_counter()
@@ -100,11 +97,6 @@ def run_rwm(
                 step_size *= 0.9
 
         step_times[i] = time.perf_counter() - t0
-        logp_trace[i] = logp
-        if i >= n_warmup:
-            # Collect post-warmup chain regardless of accept/reject.
-            nu_samples[post_idx, :] = nu
-            post_idx += 1
 
     post = slice(n_warmup, total_steps)
     warmup = slice(0, n_warmup)
@@ -120,69 +112,74 @@ def run_rwm(
         "total_mcmc_time": sampling_time,
         "total_sampler_time": warmup_time + sampling_time,
         "accept_rate": accept_rate,
-        "logp_trace": logp_trace,
         "final_step_size": float(step_size),
-        "nu_samples": nu_samples,
     }
 
 
-def compute_acf(x: np.ndarray, max_lag: int = 200) -> np.ndarray:
-    """
-    Compute normalized autocorrelation function of 1D array x
-    up to max_lag. Returns array of length max_lag+1.
-    """
-    x = x - np.mean(x)
-    var = np.var(x)
-    if var < 1e-12:
-        return np.zeros(max_lag + 1)
-    acf = np.array(
-        [np.mean(x[: len(x) - lag] * x[lag:]) / var for lag in range(max_lag + 1)]
-    )
-    return acf
+def summarize_trials(values: list[float]) -> dict[str, float | int | list[float]]:
+    """Return mean/std summary while preserving raw trial values."""
+    arr = np.asarray(values, dtype=float)
+    return {
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr)),
+        "n_trials": int(arr.size),
+        "trial_values": [float(x) for x in arr],
+    }
 
 
-def compute_ess(x: np.ndarray, max_lag: int = 500) -> float:
-    """
-    Estimate ESS via Geyer's initial positive sequence estimator.
+def summarize_trial_metric(
+    trials: list[dict[str, float]],
+    metric: str,
+) -> dict[str, float | int | list[float]]:
+    return summarize_trials([trial[metric] for trial in trials])
 
-    Forms pairs Gamma_k = rho(2k) + rho(2k+1) and sums until
-    a pair first goes negative. This avoids the arbitrary 0.05
-    threshold and is robust to noisy ACF estimates.
 
-    tau = 1 + 2 * sum of Gamma_k until first negative pair
-    ESS = n / tau
+def metric_text(metric: dict[str, float | int | list[float]], precision: int) -> str:
+    return f"{metric['mean']:.{precision}f} ± {metric['std']:.{precision}f}"
 
-    Reference: Geyer (1992), "Practical Markov Chain Monte Carlo"
-    """
-    n = len(x)
-    acf = compute_acf(x, max_lag=max_lag)
 
-    tau = 1.0
-    for k in range(1, max_lag // 2):
-        gamma_k = acf[2 * k] + acf[2 * k + 1]
-        if gamma_k < 0:
-            break
-        tau += 2 * gamma_k
-    else:
-        # Loop completed without finding negative pair —
-        # chain is too short or mixing too slowly to estimate tau reliably
-        print(
-            f"  WARNING: Geyer estimator did not terminate within "
-            f"{max_lag} lags — ESS is a lower bound. "
-            f"Consider running longer chain."
-        )
+def write_summary_csv(results: list[dict], path: str) -> None:
+    """Write a compact summary that is easy to inspect in HPC logs."""
+    metrics = [
+        "accepted_rank",
+        "factor_time",
+        "per_step_time",
+        "total_time",
+        "total_model_compute_time",
+        "accept_rate",
+        "approx_error",
+        "final_step_size",
+    ]
+    fieldnames = ["method", "k"]
+    for metric in metrics:
+        fieldnames.extend([f"{metric}_mean", f"{metric}_std", f"{metric}_n_trials"])
 
-    return float(n / tau)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for result in results:
+            row = {"method": result["method"], "k": result["k"]}
+            for metric in metrics:
+                summary = result[metric]
+                row[f"{metric}_mean"] = summary["mean"]
+                row[f"{metric}_std"] = summary["std"]
+                row[f"{metric}_n_trials"] = summary["n_trials"]
+            writer.writerow(row)
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
     data_dir = os.path.join(PROJECT_ROOT, "data")
     os.makedirs(data_dir, exist_ok=True)
 
     # MCMC setup
     n_samples = 2000
     n_warmup = 500
+    N_REPEATS = 10
     rp_k_values = [20, 50, 100]
+    print(f"Running {N_REPEATS} trials per configuration for noise-robust timing.")
 
     # Fake data and kernel
     X, y = make_fake_blobs(seed=42)
@@ -191,323 +188,155 @@ def main() -> None:
     n = K_dense.shape[0]
 
     # Dense factorization baseline
-    t0 = time.perf_counter()
-    L_dense = np.linalg.cholesky(K_dense + 1e-6 * np.eye(n))
-    dense_factor_time = time.perf_counter() - t0
+    dense_trials = []
+    for trial_idx in range(N_REPEATS):
+        seed = 42 + trial_idx
+        t0 = time.perf_counter()
+        L_dense = np.linalg.cholesky(K_dense + 1e-6 * np.eye(n))
+        dense_factor_time = time.perf_counter() - t0
 
-    dense_stats = run_rwm(
-        factor=L_dense,
-        y=y,
-        n_samples=n_samples,
-        n_warmup=n_warmup,
-        seed=123,
-    )
+        trial_stats = run_rwm(
+            factor=L_dense,
+            y=y,
+            n_samples=n_samples,
+            n_warmup=n_warmup,
+            seed=seed,
+        )
+        dense_trials.append(
+            {
+                "factor_time": float(dense_factor_time),
+                "per_step_time": trial_stats["per_step_time"],
+                "warmup_time": trial_stats["warmup_time"],
+                "sampling_time": trial_stats["sampling_time"],
+                "total_time": trial_stats["total_mcmc_time"],
+                "total_model_compute_time": (
+                    float(dense_factor_time) + trial_stats["total_sampler_time"]
+                ),
+                "accept_rate": trial_stats["accept_rate"],
+                "approx_error": 0.0,
+                "accepted_rank": float(n),
+                "final_step_size": trial_stats["final_step_size"],
+            }
+        )
+
+    if not dense_trials:
+        raise RuntimeError("Dense baseline did not run any trials.")
 
     results = [
         {
             "method": "Dense",
             "k": int(n),
-            "factor_time": float(dense_factor_time),
-            "per_step_time": dense_stats["per_step_time"],
-            "warmup_time": dense_stats["warmup_time"],
-            "sampling_time": dense_stats["sampling_time"],
-            "total_time": dense_stats["total_mcmc_time"],
-            "total_model_compute_time": float(dense_factor_time) + dense_stats["total_sampler_time"],
-            "accept_rate": dense_stats["accept_rate"],
-            "approx_error": 0.0,
-            "logp_trace": dense_stats["logp_trace"],
-            "final_step_size": dense_stats["final_step_size"],
+            "accepted_rank": summarize_trial_metric(dense_trials, "accepted_rank"),
+            "factor_time": summarize_trial_metric(dense_trials, "factor_time"),
+            "per_step_time": summarize_trial_metric(dense_trials, "per_step_time"),
+            "warmup_time": summarize_trial_metric(dense_trials, "warmup_time"),
+            "sampling_time": summarize_trial_metric(dense_trials, "sampling_time"),
+            "total_time": summarize_trial_metric(dense_trials, "total_time"),
+            "total_model_compute_time": summarize_trial_metric(
+                dense_trials, "total_model_compute_time"
+            ),
+            "accept_rate": summarize_trial_metric(dense_trials, "accept_rate"),
+            "approx_error": summarize_trial_metric(dense_trials, "approx_error"),
+            "final_step_size": summarize_trial_metric(dense_trials, "final_step_size"),
         }
     ]
 
     fro_norm_K = np.linalg.norm(K_dense, "fro")
-    rp_error_by_k = []
-    rp_factor_times = []
-    rp_total_times = []
-    rp50_factor = None
-    rp50_nu_samples = None
-    rp50_logp_trace = None
 
     for k in rp_k_values:
-        # RPCholesky: O(Nk^2) vs dense Cholesky O(N^3)
-        t0 = time.perf_counter()
-        lra = arpcholesky(A, k=k, b=10)
-        F = lra.get_left_factor()  # shape (N, k_eff)
-        rp_factor_time = time.perf_counter() - t0
+        rp_trials = []
 
-        approx_err = float(
-            np.linalg.norm(K_dense - (F @ F.T), "fro") / (fro_norm_K + 1e-12)
-        )
+        for trial_idx in range(N_REPEATS):
+            seed = 42 + trial_idx + k
 
-        if k == 50:
-            rp_stats = run_rwm(
+            # RPCholesky: O(Nk^2) vs dense Cholesky O(N^3)
+            t0 = time.perf_counter()
+            lra = arpcholesky(A, k=k, b=10, seed=seed)
+            F = lra.get_left_factor()  # shape (N, k_eff)
+            rp_factor_time = time.perf_counter() - t0
+
+            approx_err = float(
+                np.linalg.norm(K_dense - (F @ F.T), "fro") / (fro_norm_K + 1e-12)
+            )
+
+            trial_stats = run_rwm(
                 factor=F,
                 y=y,
                 n_samples=n_samples,
                 n_warmup=n_warmup,
-                seed=123 + k,
+                seed=seed,
             )
-            rp50_factor = F
-            rp50_nu_samples = rp_stats["nu_samples"]
-            rp50_logp_trace = rp_stats["logp_trace"]
-        else:
-            rp_stats = run_rwm(
-                factor=F,
-                y=y,
-                n_samples=n_samples,
-                n_warmup=n_warmup,
-                seed=123 + k,
+            rp_trials.append(
+                {
+                    "factor_time": float(rp_factor_time),
+                    "per_step_time": trial_stats["per_step_time"],
+                    "warmup_time": trial_stats["warmup_time"],
+                    "sampling_time": trial_stats["sampling_time"],
+                    "total_time": trial_stats["total_mcmc_time"],
+                    "total_model_compute_time": (
+                        float(rp_factor_time) + trial_stats["total_sampler_time"]
+                    ),
+                    "accept_rate": trial_stats["accept_rate"],
+                    "approx_error": approx_err,
+                    "accepted_rank": float(F.shape[1]),
+                    "final_step_size": trial_stats["final_step_size"],
+                }
             )
 
-        results.append(
-            {
-                "method": "RPChol",
-                "k": int(F.shape[1]),
-                "factor_time": float(rp_factor_time),
-                "per_step_time": rp_stats["per_step_time"],
-                "warmup_time": rp_stats["warmup_time"],
-                "sampling_time": rp_stats["sampling_time"],
-                "total_time": rp_stats["total_mcmc_time"],
-                "total_model_compute_time": float(rp_factor_time) + rp_stats["total_sampler_time"],
-                "accept_rate": rp_stats["accept_rate"],
-                "approx_error": approx_err,
-                "logp_trace": rp_stats["logp_trace"],
-                "final_step_size": rp_stats["final_step_size"],
-            }
-        )
+        if not rp_trials:
+            raise RuntimeError(f"RPChol k={k} did not run any trials.")
 
-        rp_error_by_k.append((int(F.shape[1]), approx_err))
-        rp_factor_times.append((f"RPChol k={int(F.shape[1])}", float(rp_factor_time)))
-        rp_total_times.append(
-            (f"RPChol k={int(F.shape[1])}", float(rp_stats["total_mcmc_time"]))
-        )
+        rp_result = {
+            "method": "RPChol",
+            "k": int(k),
+            "accepted_rank": summarize_trial_metric(rp_trials, "accepted_rank"),
+            "factor_time": summarize_trial_metric(rp_trials, "factor_time"),
+            "per_step_time": summarize_trial_metric(rp_trials, "per_step_time"),
+            "warmup_time": summarize_trial_metric(rp_trials, "warmup_time"),
+            "sampling_time": summarize_trial_metric(rp_trials, "sampling_time"),
+            "total_time": summarize_trial_metric(rp_trials, "total_time"),
+            "total_model_compute_time": summarize_trial_metric(
+                rp_trials, "total_model_compute_time"
+            ),
+            "accept_rate": summarize_trial_metric(rp_trials, "accept_rate"),
+            "approx_error": summarize_trial_metric(rp_trials, "approx_error"),
+            "final_step_size": summarize_trial_metric(rp_trials, "final_step_size"),
+        }
+        results.append(rp_result)
 
     # Print clean, aligned results table.
     row_fmt = (
-        "{:<10} {:>6} {:>16} {:>17} {:>14} {:>12} {:>12} {:>13}"
+        "{:<10} {:>6} {:>18} {:>18} {:>22} {:>22} {:>17} {:>22}"
     )
     print(
         row_fmt.format(
             "Method",
             "k",
+            "Rank",
             "Factor time(s)",
             "Per-step time(s)",
             "Total time(s)",
             "Accept rate",
-            "Step size",
             "Approx error",
         )
     )
-    print("-" * 108)
+    print("-" * 137)
     for row in results:
         print(
             row_fmt.format(
                 row["method"],
                 row["k"],
-                f"{row['factor_time']:.3f}",
-                f"{row['per_step_time']:.6f}",
-                f"{row['total_time']:.3f}",
-                f"{row['accept_rate']:.3f}",
-                f"{row['final_step_size']:.6f}",
-                f"{row['approx_error']:.6f}",
+                metric_text(row["accepted_rank"], 1),
+                metric_text(row["factor_time"], 4),
+                metric_text(row["per_step_time"], 6),
+                metric_text(row["total_time"], 3),
+                metric_text(row["accept_rate"], 2),
+                metric_text(row["approx_error"], 3),
             )
         )
 
-    # =========================
-    # Autocorrelation diagnostics (Dense vs RPChol k=50)
-    # =========================
-    print("\n=== Autocorrelation diagnostics (Dense vs RPChol k=50) ===")
-    if rp50_logp_trace is None or rp50_nu_samples is None:
-        raise RuntimeError("RPChol k=50 diagnostics are unavailable.")
-
-    dense_logp_post = dense_stats["logp_trace"][n_warmup:]
-    rp50_logp_post = rp50_logp_trace[n_warmup:]
-    dense_nu0 = dense_stats["nu_samples"][:, 0]
-    rp50_nu0 = rp50_nu_samples[:, 0]
-
-    acf_dense = compute_acf(dense_logp_post, max_lag=500)
-    acf_rp50 = compute_acf(rp50_logp_post, max_lag=500)
-
-    ess_dense_logp = compute_ess(dense_logp_post, max_lag=500)
-    ess_rp50_logp = compute_ess(rp50_logp_post, max_lag=500)
-    ess_dense_nu0 = compute_ess(dense_nu0, max_lag=500)
-    ess_rp50_nu0 = compute_ess(rp50_nu0, max_lag=500)
-
-    acf_dense_full = compute_acf(dense_logp_post, max_lag=500)
-    acf_rp50_full = compute_acf(rp50_logp_post, max_lag=500)
-
-    def _geyer_tau(acf, max_lag=500):
-        """Return tau directly from ACF using Geyer's rule."""
-        tau = 1.0
-        for k in range(1, max_lag // 2):
-            gamma_k = acf[2 * k] + acf[2 * k + 1]
-            if gamma_k < 0:
-                break
-            tau += 2 * gamma_k
-        return tau
-
-    tau_dense_logp = _geyer_tau(acf_dense_full)
-    tau_rp50_logp = _geyer_tau(acf_rp50_full)
-
-    diag_fmt = "{:<12} {:>12} {:>13} {:>12}"
-    print(diag_fmt.format("Method", "ESS (logp)", "ESS (nu[0])", "tau (logp)"))
-    print(diag_fmt.format("Dense", f"{ess_dense_logp:.1f}", f"{ess_dense_nu0:.1f}", f"{tau_dense_logp:.2f}"))
-    print(diag_fmt.format("RPChol-k50", f"{ess_rp50_logp:.1f}", f"{ess_rp50_nu0:.1f}", f"{tau_rp50_logp:.2f}"))
-
-    # Plot 5: ACF comparison for log posterior.
-    plt.figure(figsize=(7, 4))
-    plt.plot(acf_dense, label="Dense", color="tab:gray")
-    plt.plot(acf_rp50, label="RPChol k=50", color="tab:blue")
-    plt.axhline(
-        0.05, color="black", linestyle="--", linewidth=0.8, label="0.05 threshold"
-    )
-    plt.axhline(0.0, color="black", linestyle="-", linewidth=0.5)
-    plt.xlabel("Lag")
-    plt.ylabel("Autocorrelation")
-    plt.title("ACF of log posterior — Dense vs RPChol k=50")
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.xlim(0, 500)
-    plt.tight_layout()
-    plt.savefig(os.path.join(data_dir, "exp1_acf_comparison.png"), dpi=160)
-    plt.close()
-
-    # =========================
-    # Classification visualization for RPChol k=50
-    # =========================
-    print("\n=== Classification visualization (RPChol k=50) ===")
-    if rp50_factor is None or rp50_nu_samples is None:
-        raise RuntimeError("RPChol k=50 run did not produce visualization samples.")
-
-    # Posterior predictive probabilities on training points.
-    f_samples = rp50_nu_samples @ rp50_factor.T  # shape (n_samples, N)
-    p_samples = expit(f_samples)
-    p_mean = np.mean(p_samples, axis=0)
-    p_std = np.std(p_samples, axis=0)
-    y_pred = (p_mean > 0.5).astype(int)
-    accuracy = float(np.mean(y_pred == y))
-    print("RPChol k=50 classification accuracy: {:.1f}%".format(accuracy * 100.0))
-
-    # Plot 5: training scatter colored by posterior mean probability.
-    plt.figure(figsize=(6, 5))
-    sc = plt.scatter(
-        X[:, 0], X[:, 1], c=p_mean, cmap="RdBu_r", s=10, vmin=0.0, vmax=1.0
-    )
-    plt.colorbar(sc, label="P(y=1)")
-    plt.title("Posterior mean P(y=1) — RPChol k=50")
-    plt.xlabel("x1")
-    plt.ylabel("x2")
-    plt.tight_layout()
-    plt.savefig(os.path.join(data_dir, "exp1_classification_scatter.png"), dpi=160)
-    plt.close()
-
-    # Plot 6: decision boundary on a 2D grid (simple fallback).
-    x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
-    y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
-    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 80), np.linspace(y_min, y_max, 80))
-    X_grid = np.column_stack([xx.ravel(), yy.ravel()])
-
-    # k_star shape: (n_grid, N)
-    diff = X_grid[:, None, :] - X[None, :, :]
-    k_star = np.exp(-np.sum(diff**2, axis=2) / (2.0 * 1.0**2))
-    nu_mean = np.mean(rp50_nu_samples, axis=0)
-    rhs = rp50_factor @ nu_mean
-    # Approximate predictive mean using RPChol factor as kernel surrogate.
-    # FF^T approximates K here — not the exact GP predictive mean.
-    # Used for visualization only.
-    alpha = np.linalg.solve(
-        rp50_factor @ rp50_factor.T + 1e-6 * np.eye(rp50_factor.shape[0]),
-        rhs,
-    )
-    f_grid_mean = k_star @ alpha
-    p_grid = expit(f_grid_mean).reshape(xx.shape)
-
-    plt.figure(figsize=(6, 5))
-    cf = plt.contourf(
-        xx, yy, p_grid, levels=50, cmap="RdBu_r", alpha=0.6, vmin=0.0, vmax=1.0
-    )
-    plt.colorbar(cf, label="P(y=1)")
-    plt.scatter(X[y == 0, 0], X[y == 0, 1], c="blue", s=8, label="Class 0", alpha=0.4)
-    plt.scatter(X[y == 1, 0], X[y == 1, 1], c="red", s=8, label="Class 1", alpha=0.4)
-    plt.contour(xx, yy, p_grid, levels=[0.5], colors="black", linewidths=1.5)
-    plt.legend()
-    plt.title("Decision boundary — RPChol k=50")
-    plt.xlabel("x1")
-    plt.ylabel("x2")
-    plt.tight_layout()
-    plt.savefig(os.path.join(data_dir, "exp1_decision_boundary.png"), dpi=160)
-    plt.close()
-
-    # Plot 7: uncertainty on training points.
-    plt.figure(figsize=(6, 5))
-    su = plt.scatter(X[:, 0], X[:, 1], c=p_std, cmap="Oranges", s=10)
-    plt.colorbar(su, label="Std of P(y=1)")
-    plt.title("Posterior uncertainty — RPChol k=50")
-    plt.xlabel("x1")
-    plt.ylabel("x2")
-    plt.tight_layout()
-    plt.savefig(os.path.join(data_dir, "exp1_uncertainty.png"), dpi=160)
-    plt.close()
-
-    # Plot 1: bar chart factor computation time
-    labels_factor = ["Dense"] + [x[0] for x in rp_factor_times]
-    vals_factor = [dense_factor_time] + [x[1] for x in rp_factor_times]
-    plt.figure(figsize=(7, 4))
-    plt.bar(labels_factor, vals_factor, color=["tab:gray", "tab:blue", "tab:orange", "tab:green"])
-    plt.ylabel("Seconds")
-    plt.title("Factor computation time")
-    plt.tight_layout()
-    plt.savefig(os.path.join(data_dir, "exp1_factor_time_bar.png"), dpi=160)
-    plt.close()
-
-    # Plot 2: bar chart total MCMC time
-    labels_total = ["Dense"] + [x[0] for x in rp_total_times]
-    vals_total = [dense_stats["total_mcmc_time"]] + [x[1] for x in rp_total_times]
-    plt.figure(figsize=(7, 4))
-    plt.bar(labels_total, vals_total, color=["tab:gray", "tab:blue", "tab:orange", "tab:green"])
-    plt.ylabel("Seconds")
-    plt.title("Total MCMC runtime (post-warmup)")
-    plt.tight_layout()
-    plt.savefig(os.path.join(data_dir, "exp1_total_mcmc_time_bar.png"), dpi=160)
-    plt.close()
-
-    # Plot 3: approximation error vs k (RPChol only)
-    rp_error_by_k = sorted(rp_error_by_k, key=lambda t: t[0])
-    ks = [x[0] for x in rp_error_by_k]
-    errs = [x[1] for x in rp_error_by_k]
-    plt.figure(figsize=(6, 4))
-    plt.plot(ks, errs, marker="o", linewidth=1.5)
-    plt.xlabel("k")
-    plt.ylabel(r"$||K-FF^T||_F / ||K||_F$")
-    plt.title("RPCholesky approximation error vs rank")
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(os.path.join(data_dir, "exp1_approx_error_vs_k.png"), dpi=160)
-    plt.close()
-
-    # Plot 4: side-by-side trace plots (Dense vs RPChol k=50)
-    dense_trace = results[0]["logp_trace"]
-    rp50_trace = None
-    for row in results[1:]:
-        if row["k"] == 50:
-            rp50_trace = row["logp_trace"]
-            break
-
-    if rp50_trace is not None:
-        fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
-        axes[0].plot(dense_trace, linewidth=1.0, color="tab:gray")
-        axes[0].set_title("Dense trace")
-        axes[0].set_xlabel("Iteration")
-        axes[0].set_ylabel("log posterior")
-        axes[0].grid(alpha=0.3)
-
-        axes[1].plot(rp50_trace, linewidth=1.0, color="tab:blue")
-        axes[1].set_title("RPChol trace (k=50)")
-        axes[1].set_xlabel("Iteration")
-        axes[1].grid(alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(os.path.join(data_dir, "exp1_trace_dense_vs_rp50.png"), dpi=160)
-        plt.close()
+    summary_csv_path = os.path.join(data_dir, "exp1_timing_summary.csv")
+    write_summary_csv(results, summary_csv_path)
 
     np.save(
         os.path.join(data_dir, "exp1_results.npy"),
@@ -515,20 +344,14 @@ def main() -> None:
             "results": results,
             "n_samples": n_samples,
             "n_warmup": n_warmup,
+            "n_repeats": N_REPEATS,
             "target_accept": 0.30,
             "adapt_interval": 50,
         },
         allow_pickle=True,
     )
     print("Saved:")
-    print("- data/exp1_factor_time_bar.png")
-    print("- data/exp1_total_mcmc_time_bar.png")
-    print("- data/exp1_approx_error_vs_k.png")
-    print("- data/exp1_trace_dense_vs_rp50.png")
-    print("- data/exp1_acf_comparison.png")
-    print("- data/exp1_classification_scatter.png")
-    print("- data/exp1_decision_boundary.png")
-    print("- data/exp1_uncertainty.png")
+    print("- data/exp1_timing_summary.csv")
     print("- data/exp1_results.npy")
 
 

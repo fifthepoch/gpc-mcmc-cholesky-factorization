@@ -202,6 +202,7 @@ echo "==========================================================================
 
 CMD=(
   "${PYTHON}" "experiments/exp1_gpytorch_svgp_gpc_embeddings.py"
+  "--dataset" "${DATASET_NAME}"
   "--dataset-root" "${DATASET_ROOT}"
   "--embedding-file" "${EMBEDDING_FILE}"
   "--output-dir" "${OUTPUT_ROOT}"

@@ -394,14 +394,23 @@ def print_metrics(metrics: Dict[str, float], title: str) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="SVGP binary classifier on PCam-HG embeddings."
+        description="SVGP binary classifier on HG embedding datasets."
     )
 
     parser.add_argument(
+        "--dataset",
+        type=str,
+        default="pcam",
+        choices=["pcam", "camelyon17"],
+        help="Dataset name used for default root inference and output metadata.",
+    )
+    parser.add_argument(
         "--dataset-root",
         type=str,
-        default=os.path.join(PROJECT_ROOT, "datasets", "pcam-hg"),
-        help="Path to datasets/pcam-hg.",
+        default=None,
+        help=(
+            "Path to datasets/<dataset>-hg. If omitted, inferred from --dataset."
+        ),
     )
 
     parser.add_argument(
@@ -497,6 +506,9 @@ def main() -> None:
 
     torch, gpytorch = _import_torch_stack()
 
+    if args.dataset_root is None:
+        args.dataset_root = os.path.join(PROJECT_ROOT, "datasets", f"{args.dataset}-hg")
+
     os.makedirs(args.output_dir, exist_ok=True)
 
     np.random.seed(args.seed)
@@ -546,7 +558,7 @@ def main() -> None:
         valid = valid_raw
         test = test_raw
 
-    print("Loaded PCam-HG embeddings:")
+    print(f"Loaded {args.dataset} HG embeddings:")
     print(f"  train: X={train.X.shape}, y={train.y.shape}, pos_rate={train.y.mean():.4f}")
     print(f"  valid: X={valid.X.shape}, y={valid.y.shape}, pos_rate={valid.y.mean():.4f}")
     print(f"  test : X={test.X.shape}, y={test.y.shape}, pos_rate={test.y.mean():.4f}")
@@ -735,9 +747,9 @@ def main() -> None:
         n_bins=args.n_bins,
     )
 
-    print_metrics(train_metrics, title="GPyTorch SVGP PCam-HG train metrics")
-    print_metrics(valid_metrics, title="GPyTorch SVGP PCam-HG valid metrics")
-    print_metrics(test_metrics, title="GPyTorch SVGP PCam-HG test metrics")
+    print_metrics(train_metrics, title=f"GPyTorch SVGP {args.dataset} train metrics")
+    print_metrics(valid_metrics, title=f"GPyTorch SVGP {args.dataset} valid metrics")
+    print_metrics(test_metrics, title=f"GPyTorch SVGP {args.dataset} test metrics")
 
     results_path = os.path.join(args.output_dir, args.output_name)
 
@@ -756,6 +768,7 @@ def main() -> None:
         prediction_time=float(pred_time),
         final_loss=float(epoch_losses[-1]) if epoch_losses else float("nan"),
         device=str(device),
+        dataset=args.dataset,
         dataset_root=args.dataset_root,
         train_embedding_path=train.embedding_path,
         valid_embedding_path=valid.embedding_path,

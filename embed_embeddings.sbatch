@@ -71,6 +71,9 @@ LIMIT="${LIMIT:-}"
 HDF5_KEY="${HDF5_KEY:-}"
 
 SCRATCH_BASE="/scratch/${NETID}"
+if [ ! -d "${SCRATCH_BASE}" ] && [ -d "/gpfs/scratch/${NETID}" ]; then
+  SCRATCH_BASE="/gpfs/scratch/${NETID}"
+fi
 CONDA_ENV="${CONDA_ENV:-${SCRATCH_BASE}/conda-envs/gpc}"
 
 module purge || true
@@ -79,6 +82,8 @@ CONDA_SH=""
 if module --ignore_cache load anaconda3/2025.06 >/dev/null 2>&1 && \
    [ -f /share/apps/anaconda3/2025.06/etc/profile.d/conda.sh ]; then
   CONDA_SH="/share/apps/anaconda3/2025.06/etc/profile.d/conda.sh"
+elif [ -n "${CONDA_EXE:-}" ] && [ -f "$(dirname "${CONDA_EXE}")/../etc/profile.d/conda.sh" ]; then
+  CONDA_SH="$(dirname "${CONDA_EXE}")/../etc/profile.d/conda.sh"
 elif [ -f "${SCRATCH_BASE}/miniconda3/etc/profile.d/conda.sh" ]; then
   CONDA_SH="${SCRATCH_BASE}/miniconda3/etc/profile.d/conda.sh"
 elif [ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]; then

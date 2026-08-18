@@ -13,15 +13,25 @@ set -eo pipefail
 # ============================================================================
 # NETID configuration
 # ============================================================================
-NETID="${NETID:-<netid>}"
-if [ "${NETID}" = "<netid>" ]; then
+NETID="${NETID:-${USER:-<netid>}}"
+if [ "${NETID}" = "<netid>" ] || [ -z "${NETID}" ]; then
   echo "ERROR: NETID is not set." >&2
   echo "  Option A: export NETID=ab1234 before sourcing this script" >&2
   echo "  Option B: NETID=ab1234 source scripts/set_scratch_env.sh" >&2
   return 1 2>/dev/null || exit 1
 fi
 
-SCRATCH_BASE="/scratch/${NETID}"
+# Course cluster uses /scratch/<netid>; BigPurple uses /gpfs/scratch/<id>.
+if [ -z "${SCRATCH_BASE:-}" ]; then
+  if [ -d "/scratch/${NETID}" ] || { [ -d /scratch ] && [ ! -d "/gpfs/scratch/${NETID}" ]; }; then
+    SCRATCH_BASE="/scratch/${NETID}"
+  elif [ -d "/gpfs/scratch/${NETID}" ]; then
+    SCRATCH_BASE="/gpfs/scratch/${NETID}"
+  else
+    SCRATCH_BASE="/scratch/${NETID}"
+  fi
+fi
+export SCRATCH_BASE
 
 # ============================================================================
 # Create directory structure under /scratch

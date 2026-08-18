@@ -36,9 +36,25 @@ done
 # Load cluster anaconda module
 # ============================================================================
 module purge || true
-module load anaconda3/2025.06
-# source /share/apps/anaconda3/2025.06/etc/profile.d/conda.sh
-source /scratch/sd6701/miniconda3/etc/profile.d/conda.sh
+
+# Find a working conda: course-cluster module, an already-active conda
+# (CONDA_EXE), or a user miniconda under scratch or home.
+CONDA_SH=""
+if module --ignore_cache load anaconda3/2025.06 >/dev/null 2>&1 && \
+   [ -f /share/apps/anaconda3/2025.06/etc/profile.d/conda.sh ]; then
+  CONDA_SH="/share/apps/anaconda3/2025.06/etc/profile.d/conda.sh"
+elif [ -n "${CONDA_EXE:-}" ] && [ -f "$(dirname "${CONDA_EXE}")/../etc/profile.d/conda.sh" ]; then
+  CONDA_SH="$(dirname "${CONDA_EXE}")/../etc/profile.d/conda.sh"
+elif [ -f "${SCRATCH_BASE}/miniconda3/etc/profile.d/conda.sh" ]; then
+  CONDA_SH="${SCRATCH_BASE}/miniconda3/etc/profile.d/conda.sh"
+elif [ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]; then
+  CONDA_SH="${HOME}/miniconda3/etc/profile.d/conda.sh"
+else
+  echo "ERROR: Could not find conda. Load/install conda first, then rerun." >&2
+  exit 1
+fi
+echo "Using conda from: ${CONDA_SH}"
+source "${CONDA_SH}"
 
 
 # Configure conda to use scratch directories
@@ -108,8 +124,7 @@ echo ""
 echo "Environment is ready at: ${ENV_PATH}"
 echo ""
 echo "To activate in the future:"
-echo "  module load anaconda3/2025.06"
-echo "  source /share/apps/anaconda3/2025.06/etc/profile.d/conda.sh"
+echo "  source ${CONDA_SH}"
 echo "  conda activate ${ENV_PATH}"
 echo "  unset PYTHONHOME PYTHONPATH"
 echo ""

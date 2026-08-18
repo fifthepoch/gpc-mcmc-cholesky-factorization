@@ -283,6 +283,49 @@ Notes:
 
 ---
 
+## EMBED embeddings (768-d Phikon + 512-d PCA)
+
+`scripts/create_embed_embeddings.py` converts the EMBED mammography images into
+frozen-encoder embeddings. It recursively discovers image files under
+`--data-root` — `.hdf5/.h5` (one image per file, dataset key auto-detected or
+set via `--hdf5-key`), `.png/.jpg/.jpeg`, and `.dcm` (windowed via `pydicom`) —
+freezes their order into `manifest.csv`, extracts 768-d Phikon (`owkin/phikon`)
+features, then fits an IncrementalPCA projection to produce 512-d embeddings.
+
+On BigPurple the EMBED copy stores each FFDM view as an HDF5 file named
+`{patient}_{date}_{side}_{view}_1.hdf5` under `hdf5/ffdm_screening` and
+`hdf5/ffdm_diagnostic`, so point the scan at the `hdf5/` subtree:
+
+```bash
+# Direct run (GPU node):
+python scripts/create_embed_embeddings.py \
+    --data-root /gpfs/scratch/wh2757/EMBED/hdf5 \
+    --output-dir /gpfs/scratch/$USER/EMBED_embeddings \
+    --project-dim 512
+
+# Or submit as a SLURM job (from the project root):
+sbatch embed_embeddings.sbatch
+# Override paths / dataset key as needed:
+sbatch --export=ALL,DATA_ROOT=/gpfs/scratch/wh2757/EMBED/hdf5,HDF5_KEY=image embed_embeddings.sbatch
+```
+
+Note: the `#SBATCH` account/partition lines in `embed_embeddings.sbatch` are
+for the course cluster; on BigPurple change them to a GPU partition you have
+access to (e.g. `--partition=gpu4_medium`) and drop the `--account` line.
+
+Outputs (in `--output-dir`):
+
+- `manifest.csv` — row i maps to image path i (alignment source of truth)
+- `embeddings.npy` — `(N, 768)` Phikon features
+- `projected_512.npy` — `(N, 512)` PCA-projected features
+- `pca_512.npz` — fitted PCA components/mean (reusable)
+
+The job checkpoints every 500 rows (`progress.json`), so if it hits the
+walltime limit, resubmit the same command and it resumes where it stopped.
+Use `--limit 100` for a quick smoke test first.
+
+---
+
 ## Monitoring and troubleshooting
 
 ```bash
@@ -315,6 +358,8 @@ srun --jobid=<JOBID> nvidia-smi
 | `set_scratch_env.sh`                  | Redirects all caches to `/scratch/<NETID>`           |
 | `setup_env.sh`                        | Creates conda env and installs dependencies          |
 | `download_datasets.py`               | Downloads PCam, CAMELYON17-WILDS, EMBED              |
+| `create_embed_embeddings.py`         | EMBED → Phikon 768-d + PCA 512-d embeddings          |
+| `../embed_embeddings.sbatch`         | SLURM template for EMBED embedding extraction (1 GPU)|
 | `exp0_algorithm_verification.sbatch`  | SLURM template for RPCholesky benchmark (CPU)        |
 | `exp3_nn_baseline.sbatch`             | SLURM template for NN baseline (1 GPU)               |
 | `exp4_tabpfn_baseline.sbatch`         | SLURM template for TabPFN baseline (1 GPU)           |

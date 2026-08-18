@@ -20,5 +20,6 @@ h5py
 tabpfn
 tabpfn-client
 python-dotenv
+pydicom
 gpytorch
 tabpfn

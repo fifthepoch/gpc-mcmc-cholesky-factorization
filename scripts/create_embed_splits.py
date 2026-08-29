@@ -77,10 +77,40 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--label-positive-values", nargs="+", default=None,
                    help="Label values mapped to 1; everything else maps to 0. "
                         "Omit for a column that is already 0/1.")
-    p.add_argument("--join-on", choices=["path", "basename", "stem"], default="stem",
-                   help="How to match manifest images to --label-csv keys.")
+    p.add_argument("--join-on", choices=["path", "basename", "stem", "regex"],
+                   default="stem",
+                   help="How to match manifest images to --label-csv keys. Use "
+                        "'regex' to join on an id captured from the path (e.g. "
+                        "the patient id), which is what EMBED needs when the "
+                        "label table is per-patient rather than per-image.")
+    p.add_argument("--join-regex", type=str, default=None,
+                   help="Regex with one capture group, applied to the manifest "
+                        "image path to build the join key. Required for "
+                        "--join-on regex.")
+    p.add_argument("--label-key-regex", type=str, default=None,
+                   help="Regex with one capture group, applied to the "
+                        "--label-csv key column. Defaults to --join-regex.")
     p.add_argument("--drop-unlabeled", action="store_true",
                    help="Drop manifest rows with no CSV match instead of failing.")
+
+    p.add_argument("--inspect", action="store_true",
+                   help="Report the join instead of building splits: prints the "
+                        "CSV columns, sample keys from both sides, and how many "
+                        "manifest rows would match. Writes nothing.")
+
+    # Reuse an externally computed split assignment (e.g. a collaborator's
+    # patient-stratified split) instead of drawing a fresh random one.
+    p.add_argument("--split-csv", type=Path, default=None,
+                   help="CSV assigning ids to train/valid/test. Overrides "
+                        "--train-frac/--valid-frac/--group-regex.")
+    p.add_argument("--split-key-column", type=str, default=None,
+                   help="Column in --split-csv holding the id.")
+    p.add_argument("--split-column", type=str, default="split",
+                   help="Column in --split-csv holding the split name.")
+    p.add_argument("--split-key-regex", type=str, default=None,
+                   help="Regex with one capture group applied to the manifest "
+                        "image path to build the --split-csv key. Defaults to "
+                        "--join-regex.")
 
     p.add_argument("--positive-pattern", type=str, default=None,
                    help="Regex on the image path; matches get label 1.")
@@ -98,6 +128,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--overwrite", action="store_true")
 
     args = p.parse_args()
+
+    if args.join_on == "regex" and not args.join_regex:
+        p.error("--join-on regex requires --join-regex.")
+    if args.label_key_regex is None:
+        args.label_key_regex = args.join_regex
+    if args.split_key_regex is None:
+        args.split_key_regex = args.join_regex
+
+    # --inspect only reads; it does not need a complete build configuration.
+    if args.inspect:
+        if args.label_csv is not None and args.label_csv_key_column is None:
+            p.error("--inspect with --label-csv requires --label-csv-key-column.")
+        return args
+
+    if args.split_csv is not None and args.split_key_column is None:
+        p.error("--split-csv requires --split-key-column.")
+
     if (args.label_csv is None) == (args.positive_pattern is None):
         p.error("Pass exactly one of --label-csv or --positive-pattern.")
     if args.label_csv is not None and args.label_csv_key_column is None:
@@ -123,13 +170,32 @@ def read_manifest(manifest_path: Path, limit: int | None) -> list[str]:
     return images
 
 
-def join_key(image: str, mode: str) -> str:
-    path = Path(image)
-    if mode == "path":
-        return image
-    if mode == "basename":
-        return path.name
-    return path.stem
+def make_key_fn(mode: str, pattern: str | None = None):
+    """Return a callable mapping a path (or CSV cell) to a join key.
+
+    Returns None for values the key cannot be derived from, which callers
+    treat as 'no match' rather than as a key of their own.
+    """
+    if mode == "regex":
+        if not pattern:
+            raise ValueError("regex join mode requires a pattern")
+        regex = re.compile(pattern)
+
+        def from_regex(value: str) -> str | None:
+            match = regex.search(value)
+            return match.group(1) if match else None
+
+        return from_regex
+
+    def from_path(value: str) -> str | None:
+        path = Path(value)
+        if mode == "path":
+            return value
+        if mode == "basename":
+            return path.name
+        return path.stem
+
+    return from_path
 
 
 def labels_from_pattern(images: list[str], pattern: str) -> np.ndarray:
@@ -149,6 +215,9 @@ def labels_from_csv(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (labels, kept_row_indices) for rows found in the label CSV."""
     positives = set(args.label_positive_values) if args.label_positive_values else None
+    manifest_key = make_key_fn(args.join_on, args.join_regex)
+    csv_key = make_key_fn(args.join_on, args.label_key_regex)
+
     lookup: dict[str, int] = {}
     with args.label_csv.open("r", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -159,19 +228,25 @@ def labels_from_csv(
                     f"{args.label_csv} has no column {column!r}; columns: {fields}"
                 )
         for row in reader:
-            key = join_key(row[args.label_csv_key_column].strip(), args.join_on)
+            key = csv_key(row[args.label_csv_key_column].strip())
+            if key is None:
+                continue
             raw = row[args.label_column].strip()
             if positives is not None:
-                lookup[key] = int(raw in positives)
+                label = int(raw in positives)
             else:
-                lookup[key] = int(float(raw) > 0.5)
+                label = int(float(raw) > 0.5)
+            # A per-patient table repeats one id across many images. Keep the
+            # positive if any row for that id is positive.
+            lookup[key] = max(lookup.get(key, 0), label)
     print(f"[labels] {len(lookup)} keys from {args.label_csv}")
 
     kept: list[int] = []
     values: list[int] = []
     missing = 0
     for row_index, image in enumerate(images):
-        label = lookup.get(join_key(image, args.join_on))
+        key = manifest_key(image)
+        label = lookup.get(key) if key is not None else None
         if label is None:
             missing += 1
             continue
@@ -188,6 +263,128 @@ def labels_from_csv(
     labels = np.asarray(values, dtype=np.int64)
     print(f"[labels] {int(labels.sum())} positive / {len(labels)} labeled")
     return labels, np.asarray(kept, dtype=np.int64)
+
+
+def inspect_join(images: list[str], args: argparse.Namespace) -> None:
+    """Report whether a candidate label CSV can actually be joined.
+
+    Cheap dry run: prints both sides of the key and the overlap, so a bad
+    --join-on is caught before a full pass over 293k rows.
+    """
+    manifest_key = make_key_fn(args.join_on, args.join_regex)
+    manifest_keys = [manifest_key(image) for image in images]
+    derived = [key for key in manifest_keys if key is not None]
+
+    print(f"\n=== manifest ({len(images)} rows) ===")
+    print(f"  sample paths : {images[:3]}")
+    print(f"  join mode    : {args.join_on}"
+          + (f"  regex={args.join_regex!r}" if args.join_on == "regex" else ""))
+    print(f"  sample keys  : {derived[:5]}")
+    print(f"  derived keys : {len(derived)} / {len(images)} rows "
+          f"({len(set(derived))} distinct)")
+    if len(derived) < len(images):
+        print(f"  WARNING: {len(images) - len(derived)} rows yielded no key")
+
+    if args.label_csv is None:
+        print("\nNo --label-csv given; nothing to join against.")
+        return
+
+    csv_key = make_key_fn(args.join_on, args.label_key_regex)
+    with args.label_csv.open("r", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fields = reader.fieldnames or []
+        print(f"\n=== {args.label_csv} ===")
+        print(f"  columns: {fields}")
+        if args.label_csv_key_column not in fields:
+            print(f"  ERROR: no key column {args.label_csv_key_column!r}")
+            return
+        raw_samples: list[str] = []
+        keys: set[str] = set()
+        label_values: dict[str, int] = defaultdict(int)
+        for row in reader:
+            raw = row[args.label_csv_key_column].strip()
+            if len(raw_samples) < 3:
+                raw_samples.append(raw)
+            key = csv_key(raw)
+            if key is not None:
+                keys.add(key)
+            if args.label_column in fields:
+                label_values[row[args.label_column].strip()] += 1
+
+    print(f"  sample {args.label_csv_key_column}: {raw_samples}")
+    print(f"  distinct join keys: {len(keys)}")
+    print(f"  sample keys       : {sorted(keys)[:5]}")
+    if label_values:
+        top = sorted(label_values.items(), key=lambda kv: -kv[1])[:12]
+        print(f"  {args.label_column} value counts: {top}")
+
+    matched = sum(1 for key in manifest_keys if key is not None and key in keys)
+    print(f"\n=== overlap ===")
+    print(f"  manifest rows matched: {matched} / {len(images)} "
+          f"({matched / max(len(images), 1):.1%})")
+    if matched == 0:
+        print("  The two key spaces do not intersect. Change --join-on / "
+              "--join-regex / --label-key-regex before building splits.")
+
+
+def splits_from_csv(
+    images: list[str], args: argparse.Namespace
+) -> dict[str, np.ndarray]:
+    """Assign splits from an external assignment file rather than at random."""
+    key_fn = make_key_fn(
+        "regex" if args.split_key_regex else args.join_on, args.split_key_regex
+    )
+    aliases = {"val": "valid", "validation": "valid", "dev": "valid"}
+
+    assignment: dict[str, str] = {}
+    with args.split_csv.open("r", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fields = reader.fieldnames or []
+        for column in (args.split_key_column, args.split_column):
+            if column not in fields:
+                raise ValueError(
+                    f"{args.split_csv} has no column {column!r}; columns: {fields}"
+                )
+        for row in reader:
+            key = key_fn(row[args.split_key_column].strip())
+            if key is None:
+                continue
+            name = row[args.split_column].strip().lower()
+            assignment[key] = aliases.get(name, name)
+
+    print(f"[split] {len(assignment)} ids from {args.split_csv}")
+
+    positions: dict[str, list[int]] = {"train": [], "valid": [], "test": []}
+    unassigned = 0
+    unknown: set[str] = set()
+    for position, image in enumerate(images):
+        key = key_fn(image)
+        name = assignment.get(key) if key is not None else None
+        if name is None:
+            unassigned += 1
+            continue
+        if name not in positions:
+            unknown.add(name)
+            continue
+        positions[name].append(position)
+
+    if unknown:
+        raise ValueError(
+            f"{args.split_csv} has unrecognized split names {sorted(unknown)}; "
+            "expected train/valid/test."
+        )
+    if unassigned:
+        print(f"[split] WARNING: {unassigned} rows had no split assignment "
+              "and were dropped")
+    if all(len(v) == 0 for v in positions.values()):
+        raise RuntimeError(
+            f"No manifest row matched an id in {args.split_csv}. Check "
+            "--split-key-column / --split-key-regex."
+        )
+    return {
+        name: np.asarray(sorted(rows), dtype=np.int64)
+        for name, rows in positions.items()
+    }
 
 
 def stratified_split(
@@ -271,6 +468,10 @@ def main() -> None:
     emb_dir: Path = args.embeddings_dir
     images = read_manifest(emb_dir / "manifest.csv", args.limit)
 
+    if args.inspect:
+        inspect_join(images, args)
+        return
+
     if args.positive_pattern is not None:
         labels = labels_from_pattern(images, args.positive_pattern)
         source_rows_all = np.arange(len(images), dtype=np.int64)
@@ -287,7 +488,9 @@ def main() -> None:
         )
 
     rng = np.random.default_rng(args.seed)
-    if args.group_regex:
+    if args.split_csv is not None:
+        split_positions = splits_from_csv(images, args)
+    elif args.group_regex:
         split_positions = grouped_split(
             images, labels, args.group_regex, args.train_frac, args.valid_frac, rng
         )
@@ -351,7 +554,20 @@ def main() -> None:
                 "label_column": args.label_column,
                 "positive_values": args.label_positive_values,
                 "join_on": args.join_on,
+                "join_regex": args.join_regex,
+                "label_key_regex": args.label_key_regex,
             }
+        ),
+        "split_source": (
+            {
+                "type": "external_csv",
+                "csv": str(args.split_csv),
+                "key_column": args.split_key_column,
+                "split_column": args.split_column,
+                "key_regex": args.split_key_regex,
+            }
+            if args.split_csv is not None
+            else {"type": "grouped" if args.group_regex else "stratified"}
         ),
         "group_regex": args.group_regex,
         "train_frac": args.train_frac,

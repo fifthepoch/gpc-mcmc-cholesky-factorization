@@ -57,6 +57,9 @@ if [ -z "${NETID}" ]; then
 fi
 
 SCRATCH_BASE="/scratch/${NETID}"
+if [ ! -d "${SCRATCH_BASE}" ] && [ -d "/gpfs/scratch/${NETID}" ]; then
+  SCRATCH_BASE="/gpfs/scratch/${NETID}"
+fi
 CONDA_ENV="${CONDA_ENV:-${SCRATCH_BASE}/conda-envs/gpc}"
 DATASET="${DATASET:-pcam}"
 TRAIN_SPLIT="${TRAIN_SPLIT:-train}"

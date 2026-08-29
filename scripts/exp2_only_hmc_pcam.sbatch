@@ -67,6 +67,9 @@ if [ -z "${NETID}" ]; then
 fi
 
 SCRATCH_BASE="/scratch/${NETID}"
+if [ ! -d "${SCRATCH_BASE}" ] && [ -d "/gpfs/scratch/${NETID}" ]; then
+  SCRATCH_BASE="/gpfs/scratch/${NETID}"
+fi
 CONDA_ENV="${CONDA_ENV:-${SCRATCH_BASE}/conda-envs/gpc}"
 FACTOR_DIR="${FACTOR_DIR:-datasets/pcam-hg/train/embeddings/exp2_rpchol_full}"
 EMBEDDINGS="${EMBEDDINGS:-}"

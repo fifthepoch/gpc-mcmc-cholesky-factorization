@@ -20,6 +20,9 @@ fi
 
 # Optional overrides
 SCRATCH_BASE="/scratch/${NETID}"
+if [ ! -d "${SCRATCH_BASE}" ] && [ -d "/gpfs/scratch/${NETID}" ]; then
+  SCRATCH_BASE="/gpfs/scratch/${NETID}"
+fi
 PROJECT_ROOT="${PROJECT_ROOT:-${SCRATCH_BASE}/gpc-mcmc-cholesky-factorization}"
 CONDA_ENV="${CONDA_ENV:-${SCRATCH_BASE}/conda-envs/longcat}"
 OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/datasets/camelyon17-hg}"

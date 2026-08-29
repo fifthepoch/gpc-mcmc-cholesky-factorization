@@ -62,6 +62,9 @@ BATCH_SIZE="${BATCH_SIZE:-512}"
 SEED="${SEED:-42}"
 
 SCRATCH_BASE="/scratch/${NETID}"
+if [ ! -d "${SCRATCH_BASE}" ] && [ -d "/gpfs/scratch/${NETID}" ]; then
+  SCRATCH_BASE="/gpfs/scratch/${NETID}"
+fi
 CONDA_ENV="${CONDA_ENV:-${SCRATCH_BASE}/conda-envs/gpc}"
 
 # Conda activation: prefer the cluster module when available, otherwise fall

@@ -74,6 +74,9 @@ PREDICT_CHUNK_SIZE="${PREDICT_CHUNK_SIZE:-1000}"
 SEED="${SEED:-42}"
 
 SCRATCH_BASE="/scratch/${NETID}"
+if [ ! -d "${SCRATCH_BASE}" ] && [ -d "/gpfs/scratch/${NETID}" ]; then
+  SCRATCH_BASE="/gpfs/scratch/${NETID}"
+fi
 CONDA_ENV="${CONDA_ENV:-${SCRATCH_BASE}/conda-envs/gpc}"
 
 module purge || true

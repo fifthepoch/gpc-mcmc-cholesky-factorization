@@ -1,5 +1,8 @@
 """
-Experiment 2 (GPyTorch): SVGP binary GP classification on real PCam-HG embeddings.
+Experiment 1 (GPyTorch): SVGP binary GP classification on frozen embeddings.
+
+Dataset-agnostic: the split root is given by --dataset-root (PCam-HG,
+CAMELYON17-HG, EMBED, ...), and log lines name whichever was loaded.
 
 This version:
 1. Does NOT use fake/generated blob data.
@@ -367,7 +370,7 @@ def print_metrics(metrics: Dict[str, float], title: str) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="SVGP binary classifier on PCam-HG embeddings."
+        description="SVGP binary classifier on frozen embedding splits."
     )
 
     parser.add_argument(
@@ -409,6 +412,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="exp2_gpytorch_svgp_pcam_results.npz",
     )
 
+    parser.add_argument(
+        "--lengthscale",
+        type=str,
+        default="median",
+        help=(
+            "Initial RBF lengthscale: a float, or 'median' for the median "
+            "pairwise distance of a train subsample, or 'default' to keep "
+            "GPyTorch's init. On standardized d-dimensional features the "
+            "default (~0.69) makes the kernel numerically zero, which "
+            "collapses the model to a constant predictor."
+        ),
+    )
+    parser.add_argument(
+        "--lengthscale-sample",
+        type=int,
+        default=2000,
+        help="Rows sampled to estimate the median pairwise distance.",
+    )
     parser.add_argument("--num-inducing", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--num-epochs", type=int, default=50)
@@ -482,7 +503,8 @@ def main() -> None:
     valid = standardize_split(valid_raw, train_mean, train_std)
     test = standardize_split(test_raw, train_mean, train_std)
 
-    print("Loaded PCam-HG embeddings:")
+    ds_label = os.path.basename(os.path.normpath(args.dataset_root))
+    print(f"Loaded {ds_label} embeddings:")
     print(f"  train: X={train.X.shape}, y={train.y.shape}, pos_rate={train.y.mean():.4f}")
     print(f"  valid: X={valid.X.shape}, y={valid.y.shape}, pos_rate={valid.y.mean():.4f}")
     print(f"  test : X={test.X.shape}, y={test.y.shape}, pos_rate={test.y.mean():.4f}")
@@ -533,6 +555,24 @@ def main() -> None:
     inducing_points = X[perm[:num_inducing]].clone()
 
     model = SVGPBinaryClassifier(inducing_points=inducing_points).to(device)
+
+    # Initialize the RBF lengthscale to the data scale. GPyTorch defaults to
+    # softplus(0) ~= 0.69, but standardized d-dim features sit ~sqrt(2d) apart
+    # (~32 for d=512), so exp(-d^2/2l^2) underflows to 0: the kernel becomes the
+    # identity, the GP reverts to its constant mean, and the lengthscale
+    # gradient underflows too, so training cannot recover.
+    if args.lengthscale != "default":
+        if args.lengthscale == "median":
+            n_sample = min(args.lengthscale_sample, X.size(0))
+            idx = torch.randperm(X.size(0), device=device)[:n_sample]
+            init_ls = float(torch.cdist(X[idx], X[idx]).median().item())
+            print(f"Lengthscale    : {init_ls:.4f} (median heuristic, {n_sample} rows)")
+        else:
+            init_ls = float(args.lengthscale)
+            print(f"Lengthscale    : {init_ls:.4f} (fixed init)")
+        if not (init_ls > 0):
+            raise ValueError(f"Lengthscale must be positive, got {init_ls}")
+        model.covar_module.base_kernel.lengthscale = init_ls
     likelihood = gpytorch.likelihoods.BernoulliLikelihood().to(device)
 
     model.train()
@@ -646,9 +686,12 @@ def main() -> None:
         n_bins=args.n_bins,
     )
 
-    print_metrics(train_metrics, title="GPyTorch SVGP PCam-HG train metrics")
-    print_metrics(valid_metrics, title="GPyTorch SVGP PCam-HG valid metrics")
-    print_metrics(test_metrics, title="GPyTorch SVGP PCam-HG test metrics")
+    learned_ls = float(model.covar_module.base_kernel.lengthscale.detach().flatten()[0])
+    learned_os = float(model.covar_module.outputscale.detach().flatten()[0])
+    print(f"\nLearned lengthscale: {learned_ls:.4f}   outputscale: {learned_os:.4f}")
+    print_metrics(train_metrics, title=f"GPyTorch SVGP {ds_label} train metrics")
+    print_metrics(valid_metrics, title=f"GPyTorch SVGP {ds_label} valid metrics")
+    print_metrics(test_metrics, title=f"GPyTorch SVGP {ds_label} test metrics")
 
     results_path = os.path.join(args.output_dir, args.output_name)
 

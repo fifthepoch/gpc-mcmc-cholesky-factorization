@@ -48,6 +48,7 @@ LF="${LF:-25}"
 N_WARMUP="${N_WARMUP:-1000}"
 N_SAMPLES="${N_SAMPLES:-1000}"
 BANDWIDTH="${BANDWIDTH:-approx_median}"
+METRIC="${METRIC:-laplace}"
 SUBSAMPLE_TEST="${SUBSAMPLE_TEST:-}"
 SEED="${SEED:-42}"
 
@@ -135,6 +136,7 @@ echo "Output dir   : ${OUT_DIR}"
 echo "k / leapfrog : ${K} / ${LF}"
 echo "warmup/sample: ${N_WARMUP} / ${N_SAMPLES}"
 echo "bandwidth    : ${BANDWIDTH}"
+echo "HMC metric   : ${METRIC}"
 echo "=============================================================================="
 
 echo ""
@@ -161,6 +163,7 @@ CMD=(
   --n-samples "${N_SAMPLES}"
   --n-warmup "${N_WARMUP}"
   --n-leapfrog "${LF}"
+  --metric "${METRIC}"
   --output-dir "${OUT_DIR}"
   --seed "${SEED}"
 )

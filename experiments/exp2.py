@@ -84,6 +84,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-warmup", type=int, default=200)
     parser.add_argument("--n-leapfrog", type=int, default=12)
     parser.add_argument(
+        "--metric",
+        choices=["laplace", "identity"],
+        default="laplace",
+        help=(
+            "HMC mass matrix. 'laplace' uses M = I + F^T W F at the Laplace "
+            "mode and starts the chain there, which removes the anisotropy "
+            "that pins the step size. 'identity' reproduces the unpreconditioned "
+            "sampler."
+        ),
+    )
+    parser.add_argument(
         "--prediction-batch-size",
         type=int,
         default=512,
@@ -227,6 +238,34 @@ def sample_predictive_probabilities_pivots(
     }
 
 
+def laplace_metric(factor, y, newton_iters=8, tol=1e-8):
+    """Posterior mode and precision from a Newton (Laplace) approximation.
+
+    The target is log p(nu) = sum_i log Bernoulli(y_i | sigmoid(F nu)_i)
+    - 0.5||nu||^2, whose Hessian is -(I + F^T W F) with W = diag(p(1-p)).
+    That precision is only k x k, so forming and factoring it is cheap even
+    when n is large, and it captures the *rotational* anisotropy that a
+    diagonal metric cannot.
+    """
+    n, k = factor.shape
+    nu = np.zeros(k, dtype=np.float64)
+    eye = np.eye(k, dtype=np.float64)
+    hess = eye.copy()
+    for _ in range(newton_iters):
+        prob = expit(factor @ nu)
+        w = np.maximum(prob * (1.0 - prob), 1e-10)
+        grad = factor.T @ (y - prob) - nu
+        hess = eye + factor.T @ (factor * w[:, None])
+        step = np.linalg.solve(hess, grad)
+        nu = nu + step
+        if np.max(np.abs(step)) < tol:
+            break
+    prob = expit(factor @ nu)
+    w = np.maximum(prob * (1.0 - prob), 1e-10)
+    hess = eye + factor.T @ (factor * w[:, None])
+    return nu, hess
+
+
 def run_hmc(
     factor,
     y,
@@ -237,15 +276,49 @@ def run_hmc(
     n_leapfrog,
     target_accept=0.8,
     adapt_step_size=True,
+    metric="laplace",
 ):
+    """HMC with dual-averaging step size and an optional Laplace metric.
+
+    With the identity metric the sampler mixes badly here: the low-rank factor
+    has a decaying spectrum, so the posterior precision I + F^T W F is highly
+    anisotropic (condition numbers of 1e3-1e4 are typical). The step size is
+    then pinned by the tightest direction while the trajectory cannot cross the
+    widest one, which shows up as a collapsed step size and a large integrated
+    autocorrelation time.
+
+    metric="laplace" uses M = I + F^T W F evaluated at the Laplace mode, which
+    makes the target approximately isotropic in the transformed coordinates,
+    and starts the chain at that mode so there is no burn-in transient.
+    metric="identity" reproduces the previous behaviour.
+    """
     rng = np.random.default_rng(seed)
     if n_leapfrog < 1:
         raise ValueError("n_leapfrog must be at least 1")
+    if metric not in ("identity", "laplace"):
+        raise ValueError(f"Unknown metric {metric!r}")
 
     dim = factor.shape[1]
     total_steps = n_warmup + n_samples
 
     nu = np.zeros(dim, dtype=np.float64)
+    metric_chol = None
+    if metric == "laplace":
+        t_metric = time.perf_counter()
+        mode, hess = laplace_metric(factor, y)
+        # Symmetrize and jitter for a safe Cholesky.
+        hess = 0.5 * (hess + hess.T)
+        jitter = 1e-10 * float(np.trace(hess)) / dim
+        metric_chol = np.linalg.cholesky(hess + jitter * np.eye(dim))
+        nu = mode.copy()
+        cond = float(np.linalg.cond(hess))
+        print(
+            f"Laplace metric: built in {time.perf_counter() - t_metric:.2f}s, "
+            f"posterior precision condition number {cond:.3g}, "
+            f"chain initialized at the mode",
+            flush=True,
+        )
+
     logp = log_posterior(nu, factor, y)
 
     nu_samples = np.zeros((n_samples, dim), dtype=np.float64)
@@ -253,6 +326,18 @@ def run_hmc(
     step_times = np.zeros(total_steps, dtype=np.float64)
     accepts = np.zeros(total_steps, dtype=bool)
     post_idx = 0
+
+    def draw_momentum():
+        z = rng.standard_normal(dim)
+        # p ~ N(0, M). With M = L L^T that is p = L z.
+        return z if metric_chol is None else metric_chol @ z
+
+    def apply_inv_mass(p_vec):
+        # M^{-1} p via the Cholesky factor.
+        if metric_chol is None:
+            return p_vec
+        tmp = solve_triangular(metric_chol, p_vec, lower=True, check_finite=False)
+        return solve_triangular(metric_chol.T, tmp, lower=False, check_finite=False)
 
     step_size = initial_step_size
     log_step = np.log(initial_step_size)
@@ -271,14 +356,14 @@ def run_hmc(
 
         current_nu = nu.copy()
         current_logp = logp
-        momentum = rng.standard_normal(dim)
+        momentum = draw_momentum()
 
         grad, _ = grad_log_posterior_with_cache(current_nu, factor, y)
         proposal_nu = current_nu.copy()
         proposal_p = momentum + 0.5 * step_size * grad
 
         for leapfrog_idx in range(n_leapfrog):
-            proposal_nu = proposal_nu + step_size * proposal_p
+            proposal_nu = proposal_nu + step_size * apply_inv_mass(proposal_p)
             grad, proposal_prob = grad_log_posterior_with_cache(
                 proposal_nu,
                 factor,
@@ -295,9 +380,13 @@ def run_hmc(
             proposal_prob,
             y,
         )
-        current_h = -current_logp + 0.5 * np.dot(momentum, momentum)
-        proposal_h = -proposal_logp + 0.5 * np.dot(proposal_p, proposal_p)
+        current_h = -current_logp + 0.5 * np.dot(momentum, apply_inv_mass(momentum))
+        proposal_h = -proposal_logp + 0.5 * np.dot(
+            proposal_p, apply_inv_mass(proposal_p)
+        )
         log_accept = current_h - proposal_h
+        if not np.isfinite(log_accept):
+            log_accept = -np.inf
         accept_prob = 1.0 if log_accept >= 0.0 else float(np.exp(log_accept))
 
         if np.log(rng.random()) < log_accept:
@@ -327,6 +416,7 @@ def run_hmc(
         "logp_trace": logp_trace,
         "accept_rate": float(np.mean(accepts[post])),
         "step_size": float(step_size),
+        "metric": metric,
         "per_step_time": float(np.mean(step_times[post])),
         # Standard timing convention: total_mcmc_time is post-warmup sampling only.
         "warmup_time": warmup_time,
@@ -465,6 +555,7 @@ def main():
         n_leapfrog=args.n_leapfrog,
         target_accept=args.hmc_target_accept,
         adapt_step_size=args.adapt_step_size,
+        metric=args.metric,
     )
 
     nu_samples = hmc_stats["nu_samples"]
@@ -474,8 +565,26 @@ def main():
     print(f"HMC sampling time: {hmc_stats['sampling_time']:.2f}s")
     print(f"HMC acceptance rate: {hmc_stats['accept_rate']:.3f}")
     print(f"HMC final step size: {hmc_stats['step_size']:.6f}")
-    print(f"HMC tau (nu mean): {tau_nu:.2f}")
-    print(f"HMC tau (logp): {tau_logp:.2f}")
+    def _ess(tau_value):
+        """ESS from tau. emcee can return tau <= 0 when the chain is
+        effectively uncorrelated; treat that as tau = 1 (independent draws)."""
+        if tau_value is None or not np.isfinite(tau_value):
+            return float("nan")
+        return args.n_samples / max(float(tau_value), 1.0)
+
+    ess_nu = _ess(tau_nu)
+    ess_logp = _ess(tau_logp)
+    print(f"HMC tau (nu mean): {tau_nu:.2f}   ESS ~ {ess_nu:.1f} / {args.n_samples}")
+    print(f"HMC tau (logp): {tau_logp:.2f}   ESS ~ {ess_logp:.1f} / {args.n_samples}")
+    print(f"HMC metric: {hmc_stats.get('metric')}")
+    if np.isfinite(ess_nu) and ess_nu < 50:
+        print(
+            f"WARNING: effective sample size {ess_nu:.1f} is far below the "
+            f"{args.n_samples} nominal draws. Posterior summaries and the "
+            "predictive distribution are unreliable; raise --n-samples/--n-warmup "
+            "or reduce --n-leapfrog.",
+            flush=True,
+        )
 
     print("Sampling test predictive distribution...")
     t_pred_start = time.perf_counter()

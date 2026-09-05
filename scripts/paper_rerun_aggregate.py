@@ -150,7 +150,7 @@ def main() -> None:
     problems = []
 
     for dataset in sorted(grouped):
-        mean_rows, std_rows, all_rows = [], [], []
+        out_rows = []
 
         for experiment in EXPERIMENT_ORDER:
             rows = grouped[dataset].get(experiment)
@@ -158,42 +158,40 @@ def main() -> None:
                 problems.append(f"{dataset}/{experiment}: no runs found")
                 continue
 
+            rows = sorted(rows, key=lambda r: as_number(r.get("seed")) or 0)
             n = len(rows)
             if args.expect_runs is not None and n != args.expect_runs:
                 problems.append(
                     f"{dataset}/{experiment}: {n} runs, expected {args.expect_runs}"
                 )
 
-            seeds = sorted(as_number(r.get("seed")) or -1 for r in rows)
-            note = (
-                f"Mean of {n} runs (seeds {', '.join(str(int(s)) for s in seeds)}). "
-                f"Per-run spread is in the companion _std.csv. "
-            )
+            seeds = [int(as_number(r.get("seed")) or -1) for r in rows]
+            seed_list = ", ".join(str(s) for s in seeds)
+
+            # The individual runs first, then their mean, then their spread.
+            out_rows.extend(rows)
 
             mean_row = reduce_group(rows, "mean")
-            mean_row["record_id"] = f"rerun-{dataset}-{experiment}-mean{n}"
-            mean_row["notes"] = note + str(rows[0].get("notes", ""))
-            mean_rows.append(mean_row)
+            mean_row["record_id"] = f"rerun-{dataset}-{experiment}-MEAN-n{n}"
+            mean_row["notes"] = f"MEAN of {n} runs (seeds {seed_list})."
+            out_rows.append(mean_row)
 
             std_row = reduce_group(rows, "std")
-            std_row["record_id"] = f"rerun-{dataset}-{experiment}-std{n}"
-            std_row["notes"] = f"Sample standard deviation over {n} runs."
-            std_rows.append(std_row)
-
-            all_rows.extend(sorted(rows, key=lambda r: as_number(r.get("seed")) or 0))
+            std_row["record_id"] = f"rerun-{dataset}-{experiment}-STD-n{n}"
+            std_row["notes"] = f"Sample standard deviation over {n} runs (seeds {seed_list})."
+            out_rows.append(std_row)
 
             acc, auroc = mean_row.get("accuracy"), mean_row.get("auroc")
-            print(f"{dataset:11s} {experiment}  n={n}  "
-                  f"accuracy={acc:.6f}  auroc={auroc:.6f}"
-                  if isinstance(acc, float) and isinstance(auroc, float)
-                  else f"{dataset:11s} {experiment}  n={n}")
+            if isinstance(acc, float) and isinstance(auroc, float):
+                print(f"{dataset:11s} {experiment}  n={n}  "
+                      f"accuracy={acc:.6f}  auroc={auroc:.6f}")
+            else:
+                print(f"{dataset:11s} {experiment}  n={n}")
 
-        if mean_rows:
-            write_csv(out_dir / f"experiment_results_{dataset}_rerun.csv", mean_rows)
-            write_csv(out_dir / f"experiment_results_{dataset}_rerun_std.csv", std_rows)
-            write_csv(out_dir / f"experiment_results_{dataset}_allruns.csv", all_rows)
-            print(f"  -> {out_dir}/experiment_results_{dataset}_rerun.csv "
-                  f"({len(mean_rows)} rows)")
+        if out_rows:
+            path = out_dir / f"experiment_results_{dataset}_rerun.csv"
+            write_csv(path, out_rows)
+            print(f"  -> {path}  ({len(out_rows)} rows)")
 
     if problems:
         print("\nWARNINGS:")

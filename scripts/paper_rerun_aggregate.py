@@ -29,6 +29,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "experiments" / "paper_rerun"))
 
+import runpaths  # noqa: E402
 import schema  # noqa: E402
 
 EXPERIMENT_ORDER = ["exp1", "exp2"]
@@ -39,8 +40,7 @@ SEED_COLUMN = "seed"
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--run-dir", default="data/paper_rerun/runs")
-    p.add_argument("--out-dir", default="data/paper_rerun")
+    runpaths.add_arguments(p)
     p.add_argument(
         "--expect-runs",
         type=int,
@@ -138,7 +138,7 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 def main() -> None:
     args = parse_args()
-    run_dir = Path(args.run_dir)
+    run_dir, out_dir = runpaths.resolve(args)
     if not run_dir.exists():
         raise SystemExit(f"No run directory at {run_dir} -- run the experiments first.")
 
@@ -146,7 +146,6 @@ def main() -> None:
     if not grouped:
         raise SystemExit(f"No seed*.json files found under {run_dir}.")
 
-    out_dir = Path(args.out_dir)
     problems = []
 
     for dataset in sorted(grouped):

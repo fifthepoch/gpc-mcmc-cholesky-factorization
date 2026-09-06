@@ -29,7 +29,16 @@ PROJECT_ROOT="${PROJECT_ROOT:-/gpfs/scratch/sd6701/gpc-mcmc-cholesky-factorizati
 CONDA_ENV="${CONDA_ENV:-/gpfs/scratch/sd6701/conda-envs/gpc}"
 CONDA_SH="${CONDA_SH:-/gpfs/scratch/sd6701/miniconda3/etc/profile.d/conda.sh}"
 DATA_ROOT="${DATA_ROOT:-${PROJECT_ROOT}/experiments/ML-Final-Project/Datasets}"
-RUN_DIR="${RUN_DIR:-${PROJECT_ROOT}/data/paper_rerun/runs}"
+# Every batch writes into its own data/paper_rerun/<RUN_ID>/ so a new run can
+# never mix with or overwrite an earlier one. Pass RUN_ID explicitly so the
+# exp1 and exp2 arrays share one directory -- the fallback below is per-array
+# and would split them into two.
+if [ -z "${RUN_ID:-}" ]; then
+  RUN_ID="batch-${SLURM_ARRAY_JOB_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+  echo "WARNING: RUN_ID not supplied; defaulting to ${RUN_ID}." >&2
+  echo "         exp1 and exp2 will land in DIFFERENT directories." >&2
+fi
+RUN_DIR="${RUN_DIR:-${PROJECT_ROOT}/data/paper_rerun/${RUN_ID}/runs}"
 SEED="${SLURM_ARRAY_TASK_ID:-1}"
 
 # Per-test-point predictions are always saved now (needed for reliability
@@ -60,6 +69,7 @@ export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 echo "=============================================================="
 echo "exp1 paper rerun | seed=${SEED} | job=${SLURM_JOB_ID:-local}"
 echo "node=$(hostname) | start=$(date)"
+echo "run id : ${RUN_ID}"
 echo "=============================================================="
 
 "${PYTHON}" -c "import torch, gpytorch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"

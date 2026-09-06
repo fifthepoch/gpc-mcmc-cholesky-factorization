@@ -19,9 +19,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
 
 import numpy as np
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / "experiments" / "paper_rerun"))
+import runpaths  # noqa: E402
 
 METHODS = {"exp1": "SVGP", "exp2": "RPChol+HMC"}
 COLORS = {"exp1": "tab:orange", "exp2": "tab:blue"}
@@ -29,8 +34,7 @@ COLORS = {"exp1": "tab:orange", "exp2": "tab:blue"}
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--run-dir", default="data/paper_rerun/runs")
-    p.add_argument("--out-dir", default="data/paper_rerun")
+    runpaths.add_arguments(p)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--n-bins", type=int, default=15)
     p.add_argument(
@@ -73,7 +77,7 @@ def main() -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    run_dir, out_dir = Path(args.run_dir), Path(args.out_dir)
+    run_dir, out_dir = runpaths.resolve(args)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     datasets = sorted(d.name for d in run_dir.iterdir() if d.is_dir())

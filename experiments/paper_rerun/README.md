@@ -26,12 +26,15 @@ jobs fail at import.
 
 ## Running
 
-    # 5 seeds x 2 datasets, one array task per seed
-    sbatch scripts/paper_rerun_exp2.sbatch    # CPU only, ~50 min/task
-    sbatch scripts/paper_rerun_exp1.sbatch    # needs a GPU, ~10 min/task
+    # one id for the whole batch, shared by both arrays
+    RUN_ID="run-$(date -u +%Y%m%dT%H%M%SZ)"
+
+    sbatch --export=ALL,RUN_ID=$RUN_ID scripts/paper_rerun_exp2.sbatch  # CPU
+    sbatch --export=ALL,RUN_ID=$RUN_ID scripts/paper_rerun_exp1.sbatch  # GPU
 
     # once both arrays finish
-    python scripts/paper_rerun_aggregate.py --expect-runs 5
+    python scripts/paper_rerun_aggregate.py --run-id $RUN_ID --expect-runs 5
+    python scripts/paper_rerun_reliability.py --run-id $RUN_ID --seed 1
 
 Change the seed count by editing `--array=1-5` in both sbatch files.
 
@@ -47,12 +50,23 @@ Single run, no SLURM:
 
 ## Output
 
-    data/paper_rerun/
+Every submission writes into its own batch directory, so a new run can never
+overwrite an earlier one:
+
+    data/paper_rerun/<RUN_ID>/
       runs/<dataset>/<experiment>/seed###.json      one row per run
       runs/<dataset>/exp{1,2}_seed<N>_preds.npz     per-test-point predictions
       experiment_results_<dataset>_rerun.csv        <- the deliverable
       reliability_<dataset>.png                     calibration curves
       reliability_summary.csv                       per-bin numbers
+
+Pass RUN_ID on the sbatch command line so the exp1 and exp2 arrays share one
+directory. Without it each array falls back to its own SLURM array job id and
+they land separately.
+
+The post-processing scripts read the most recently modified batch by default;
+use `--run-id <name>` to pick another, or `--run-dir <path>` for an explicit
+location. A pre-existing flat `data/paper_rerun/runs` is still handled.
 
 Each `_rerun.csv` holds 14 rows per dataset: the 5 individual seeds, then a
 MEAN row, then a STD row -- for exp1, then again for exp2.

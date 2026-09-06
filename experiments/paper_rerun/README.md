@@ -49,11 +49,19 @@ Single run, no SLURM:
 
     data/paper_rerun/
       runs/<dataset>/<experiment>/seed###.json      one row per run
-      experiment_results_<dataset>_rerun.csv        <- the deliverable (means)
-      experiment_results_<dataset>_rerun_std.csv    sample std of each field
-      experiment_results_<dataset>_allruns.csv      every seed, for traceability
+      runs/<dataset>/exp{1,2}_seed<N>_preds.npz     per-test-point predictions
+      experiment_results_<dataset>_rerun.csv        <- the deliverable
+      reliability_<dataset>.png                     calibration curves
+      reliability_summary.csv                       per-bin numbers
 
-Each `_rerun.csv` holds two rows, exp1 and exp2, in the original column order.
+Each `_rerun.csv` holds 14 rows per dataset: the 5 individual seeds, then a
+MEAN row, then a STD row -- for exp1, then again for exp2.
+
+The `_preds.npz` files carry `predictive_prob` and `y_test`; exp2 adds
+`prob_std`, `latent_mean` and `latent_std`. Turn them into reliability
+diagrams with:
+
+    python scripts/paper_rerun_reliability.py --seed 1
 
 ## Defaults reproduce the recorded rows
 
@@ -62,9 +70,17 @@ exp2: `k=200`, `b=10`, `n_samples=1000`, `n_warmup=1000`, `n_leapfrog=25`,
 recorded `step_size`), bandwidth via `approx_median`.
 
 exp1: `num_inducing=512`, `batch_size=1024`, `50` epochs, `lr=0.01`,
-`lengthscale_init=64.0`, `outputscale_init=1.0`. Split sizes follow the
-recorded rows -- pcam used a stratified 3000/500 subsample, camelyon17 used
-everything. Override with `--max-train` / `--max-valid`.
+`lengthscale_init=64.0`, `outputscale_init=1.0`. Both datasets train on their
+FULL splits so SVGP sees the same data as the exp2 run it is compared against.
+The recorded pcam row used a stratified 3000/500 subsample; reproduce it with
+`--max-train 3000 --max-valid 500` (or `MAX_TRAIN=3000` for the sbatch).
+
+## Timing fields
+
+Both experiments populate `fit_or_train_time_sec` / `train_time_sec` so the two
+are directly comparable: for SVGP that is the epoch loop, for HMC it is
+warmup + sampling. `total_pipeline_time_sec` covers everything including data
+loading and evaluation.
 
 ## Two deviations from the recorded rows
 

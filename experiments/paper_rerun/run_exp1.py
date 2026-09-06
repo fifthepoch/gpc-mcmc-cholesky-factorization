@@ -33,10 +33,12 @@ from predictive_metrics2 import (  # noqa: E402
     evaluate_binary_probabilistic_predictions,
 )
 
-# Split sizes of the recorded rows, so a default run reproduces them.
-# pcam was a stratified 3000/500 subsample; camelyon17 used everything.
+# Both datasets now train on their full splits, so SVGP sees the same data as
+# the RPCholesky+HMC run it is compared against. The recorded pcam row used a
+# stratified 3000/500 subsample -- reproduce it with --max-train 3000
+# --max-valid 500 if you need that number back.
 DATASET_DEFAULTS = {
-    "pcam": {"max_train": 3000, "max_valid": 500},
+    "pcam": {"max_train": None, "max_valid": None},
     "camelyon17": {"max_train": None, "max_valid": None},
 }
 
@@ -306,6 +308,13 @@ def main() -> None:
     })
 
     path = schema.write_run(row, args.run_dir, args.dataset, "exp1", args.seed)
+
+    # Per-point arrays for reliability diagrams. SVGP gives a point predictive
+    # probability, so there is no sample spread to store.
+    pred_path = Path(args.run_dir) / args.dataset / f"exp1_seed{args.seed}_preds.npz"
+    pred_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(pred_path, predictive_prob=p_test, y_test=y_te)
+    print(f"  saved predictions to {pred_path}")
     print(f"  accuracy={metrics['accuracy']:.6f}  auroc={metrics['auroc']:.6f}  "
           f"total={total_wall:.2f}s")
     print(f"  wrote {path}")

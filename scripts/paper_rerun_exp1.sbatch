@@ -32,6 +32,19 @@ DATA_ROOT="${DATA_ROOT:-${PROJECT_ROOT}/experiments/ML-Final-Project/Datasets}"
 RUN_DIR="${RUN_DIR:-${PROJECT_ROOT}/data/paper_rerun/runs}"
 SEED="${SLURM_ARRAY_TASK_ID:-1}"
 
+# Per-test-point predictions are always saved now (needed for reliability
+# diagrams). Set MAX_TRAIN to cap the training split, e.g. MAX_TRAIN=3000 to
+# reproduce the old subsampled pcam baseline.
+EXTRA_ARGS=""
+if [ -n "${MAX_TRAIN:-}" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --max-train ${MAX_TRAIN}"
+fi
+# LENGTHSCALE overrides the RBF init. 64.0 is the default (from the camelyon17
+# sweep); sqrt(512)=22.627 scored better on pcam in job 178255.
+if [ -n "${LENGTHSCALE:-}" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --lengthscale-init ${LENGTHSCALE}"
+fi
+
 cd "${PROJECT_ROOT}"
 mkdir -p slurm_logs/paper_rerun "${RUN_DIR}"
 
@@ -58,7 +71,7 @@ for DATASET in pcam camelyon17; do
     --dataset "${DATASET}" \
     --data-root "${DATA_ROOT}" \
     --seed "${SEED}" \
-    --run-dir "${RUN_DIR}"
+    --run-dir "${RUN_DIR}" ${EXTRA_ARGS}
 done
 
 echo ""

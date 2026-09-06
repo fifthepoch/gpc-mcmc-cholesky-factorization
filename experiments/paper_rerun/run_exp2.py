@@ -252,6 +252,10 @@ def main() -> None:
         "warmup_time_sec": hmc["warmup_time"],
         "sampling_time_sec": hmc["sampling_time"],
         "total_mcmc_time_sec": total_mcmc,
+        # HMC's analogue of "training" is warmup + sampling. Recorded under the
+        # same field names SVGP uses so the two are comparable in the CSV.
+        "fit_or_train_time_sec": hmc["warmup_time"] + hmc["sampling_time"],
+        "train_time_sec": hmc["warmup_time"] + hmc["sampling_time"],
         "predictive_sampling_time_sec": inference_time,
         "inference_time_sec": inference_time,
         "prediction_time_sec": inference_time,
@@ -295,6 +299,21 @@ def main() -> None:
     })
 
     path = schema.write_run(row, args.run_dir, args.dataset, "exp2", args.seed)
+
+    # Per-point arrays for reliability diagrams. The full p_samples matrix is
+    # n_samples x n_test and far too large to keep, so store the posterior
+    # summaries alongside the mean.
+    pred_path = Path(args.run_dir) / args.dataset / f"exp2_seed{args.seed}_preds.npz"
+    pred_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        pred_path,
+        predictive_prob=summary["prob_mean"],
+        y_test=y_test,
+        prob_std=summary["prob_std"],
+        latent_mean=summary["latent_mean"],
+        latent_std=summary["latent_std"],
+    )
+    print(f"  saved predictions to {pred_path}")
     print(f"  accuracy={metrics['accuracy']:.6f}  auroc={metrics['auroc']:.6f}  "
           f"total={total_wall:.2f}s")
     print(f"  wrote {path}")
